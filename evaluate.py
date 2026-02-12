@@ -30,10 +30,11 @@ def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots"):
     vel = np.array(data["velocities"])
     ang_vel = np.rad2deg(np.array(data["angular_velocities"]))
     motors = np.array(data["motor_commands"])
+    actions = np.array(data["actions"])
     rewards = np.array(data["rewards"])
     pos_err = np.linalg.norm(pos - tgt, axis=1)
 
-    fig, axes = plt.subplots(3, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(4, 2, figsize=(14, 13))
     fig.suptitle(f"Episode {episode_num}", fontsize=14)
 
     # Position tracking
@@ -75,7 +76,6 @@ def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots"):
     ax = axes[2, 0]
     for i, label in enumerate(["wx", "wy", "wz"]):
         ax.plot(t, ang_vel[:, i], label=label)
-    ax.set_xlabel("Time (s)")
     ax.set_ylabel("Angular vel (deg/s)")
     ax.set_title("Angular Velocity")
     ax.legend()
@@ -85,9 +85,28 @@ def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots"):
     ax = axes[2, 1]
     for i in range(4):
         ax.plot(t, motors[:, i], label=f"M{i+1}")
-    ax.set_xlabel("Time (s)")
     ax.set_ylabel("Thrust (N)")
     ax.set_title("Motor Commands")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Policy actions
+    ax = axes[3, 0]
+    ax.plot(t, actions[:, 0], label="thrust")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Action (normalized)")
+    ax.set_title("Policy Action: Thrust")
+    ax.set_ylim(-1.1, 1.1)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[3, 1]
+    for i, label in enumerate(["roll rate", "pitch rate", "yaw rate"]):
+        ax.plot(t, actions[:, i + 1], label=label)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Action (normalized)")
+    ax.set_title("Policy Actions: Body Rates")
+    ax.set_ylim(-1.1, 1.1)
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -112,6 +131,9 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
     print(f"Loading model from {model_path}...")
     model = PPO.load(model_path, device="cpu")
 
+    # Resolve model directory for saving plots and description
+    model_dir = os.path.dirname(os.path.abspath(model_path))
+
     # Create environment
     env = HoverEnv()
 
@@ -128,15 +150,21 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
         ep_data = {
             "times": [], "positions": [], "targets": [],
             "attitudes": [], "velocities": [], "angular_velocities": [],
-            "motor_commands": [], "rewards": [],
+            "motor_commands": [], "actions": [], "rewards": [],
         }
 
         # Setup viewer for this episode
         viewer = None
         if render:
             viewer = mujoco.viewer.launch_passive(env.model, env.data)
+            viewer.cam.lookat[:] = [0.0, 0.0, 0.8]
+            viewer.cam.distance = 7.0
+            viewer.cam.azimuth = 135
+            viewer.cam.elevation = -25
 
+        target = info["target"]
         print(f"\n--- Episode {ep + 1}/{num_episodes} ---")
+        print(f"  Target position: [{target[0]:.2f}, {target[1]:.2f}, {target[2]:.2f}]")
 
         while not done:
             # Get action from policy
@@ -159,6 +187,7 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
                 ep_data["velocities"].append(state[6:9].copy())
                 ep_data["angular_velocities"].append(state[9:12].copy())
                 ep_data["motor_commands"].append(info["motor_commands"].copy())
+                ep_data["actions"].append(action.copy())
                 ep_data["rewards"].append(reward)
 
             # Render
@@ -185,7 +214,7 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
         print(f"  {status} after {step_count} steps, total reward: {total_reward:.2f}")
 
         if plot and len(ep_data["times"]) > 0:
-            plot_episode(ep_data, ep + 1)
+            plot_episode(ep_data, ep + 1, save_dir=os.path.join(model_dir, "plots"))
 
     env.close()
 
@@ -194,6 +223,17 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
     print(f"Episodes: {num_episodes}")
     print(f"Mean reward: {np.mean(episode_rewards):.2f} +/- {np.std(episode_rewards):.2f}")
     print(f"Mean length: {np.mean(episode_lengths):.1f} +/- {np.std(episode_lengths):.1f}")
+
+    # Prompt for description and save to model directory
+    print("\nEnter a brief description of this policy (or press Enter to skip):")
+    description = input("> ").strip()
+    if description:
+        desc_path = os.path.join(model_dir, "description.txt")
+        with open(desc_path, "w") as f:
+            f.write(f"Mean reward: {np.mean(episode_rewards):.2f} +/- {np.std(episode_rewards):.2f}\n")
+            f.write(f"Mean length: {np.mean(episode_lengths):.1f} +/- {np.std(episode_lengths):.1f}\n\n")
+            f.write(f"{description}\n")
+        print(f"Description saved to {desc_path}")
 
 
 def interactive_control(render: bool = True):
@@ -256,7 +296,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="./models_trained/20260209_182641/best_model.zip",
+        default="./models_trained/20260212_104313/best_model.zip",
         help="Path to trained model"
     )
     parser.add_argument(
@@ -273,7 +313,7 @@ def main():
     parser.add_argument(
         "--plot",
         action="store_true",
-        help="Generate performance plots (saved to ./plots/)"
+        help="Generate performance plots (saved to model directory)"
     )
     parser.add_argument(
         "--test-hover",

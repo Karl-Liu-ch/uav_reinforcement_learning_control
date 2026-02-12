@@ -1,6 +1,8 @@
 """PPO training script for quadrotor hover control."""
 
 import os
+import json
+import inspect
 import torch.nn as nn
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
@@ -33,27 +35,24 @@ def main():
     print(f"Creating {n_envs} parallel environments...")
     vec_env = make_vec_env(HoverEnv, n_envs=n_envs)
 
-    # PPO configuration
-    policy_kwargs = {
-        "net_arch": [256, 256],
-        "activation_fn": nn.Tanh,
-    }
-
     model = PPO(
         policy="MlpPolicy",
         env=vec_env,
-        learning_rate=3e-4,
-        n_steps=800,
-        batch_size=256,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.01,
-        policy_kwargs=policy_kwargs,
+        learning_rate=0.0001547818138087132,
+        n_steps=1024,
+        batch_size=128,
+        n_epochs=20,
+        gamma=0.9906345854291289,
+        gae_lambda=0.9079441765099094,
+        clip_range=0.19153175856282983,
+        ent_coef=9.106557393423481e-05,
+        policy_kwargs={
+            "net_arch": [128, 128],
+            "activation_fn": nn.ReLU,
+        },
         verbose=1,
         tensorboard_log=log_dir,
-        device="cpu",  # MLP policy is faster on CPU anyway
+        device="cpu",
     )
 
     # Callbacks
@@ -73,6 +72,45 @@ def main():
         n_eval_episodes=5,
         deterministic=True,
     )
+
+    # Save run config: reward function, observation space, and hyperparameters
+    env_tmp = HoverEnv()
+    config = {
+        "timestamp": run_timestamp,
+        "total_timesteps": total_timesteps,
+        "n_envs": n_envs,
+        "reward_function": inspect.getsource(env_tmp._get_reward),
+        "observation_function": inspect.getsource(env_tmp._get_obs),
+        "observation_bounds": {
+            "low": env_tmp._obs_bounds.low.tolist(),
+            "high": env_tmp._obs_bounds.high.tolist(),
+        },
+        "state_bounds": {
+            "low": env_tmp._state_bounds.low.tolist(),
+            "high": env_tmp._state_bounds.high.tolist(),
+        },
+        "target_pos_bounds": {
+            "low": env_tmp._target_pos_bounds.low.tolist(),
+            "high": env_tmp._target_pos_bounds.high.tolist(),
+        },
+        "ppo": {
+            "learning_rate": model.learning_rate,
+            "n_steps": model.n_steps,
+            "batch_size": model.batch_size,
+            "n_epochs": model.n_epochs,
+            "gamma": model.gamma,
+            "gae_lambda": model.gae_lambda,
+            "clip_range": float(model.clip_range(1)),
+            "ent_coef": model.ent_coef,
+            "net_arch": [128, 128],
+            "activation_fn": "ReLU",
+        },
+    }
+    env_tmp.close()
+    config_path = os.path.join(model_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+    print(f"Run config saved to {config_path}")
 
     # Train
     print(f"Starting training for {total_timesteps} timesteps...")
