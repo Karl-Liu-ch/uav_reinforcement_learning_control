@@ -14,7 +14,8 @@ from stable_baselines3 import PPO
 from envs import HoverEnv, get_wrapper
 
 
-def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots"):
+def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots",
+                 max_rate: float = 360.0):
     """Generate performance plots for a single evaluation episode.
 
     Args:
@@ -22,6 +23,7 @@ def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots"):
               velocities, angular_velocities, motor_commands, rewards.
         episode_num: Episode number (for title and filename).
         save_dir: Directory to save plot images.
+        max_rate: Max body rate in deg/s (for denormalizing rate actions).
     """
     os.makedirs(save_dir, exist_ok=True)
 
@@ -36,7 +38,11 @@ def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots"):
     rewards = np.array(data["rewards"])
     pos_err = np.linalg.norm(pos - tgt, axis=1)
 
-    fig, axes = plt.subplots(4, 2, figsize=(14, 13))
+    # Commanded body rates (deg/s) from normalized actions
+    cmd_rates = actions[:, 1:4] * max_rate
+    rate_err = cmd_rates - ang_vel
+
+    fig, axes = plt.subplots(5, 2, figsize=(14, 16))
     fig.suptitle(f"Episode {episode_num}", fontsize=14)
 
     # Position tracking
@@ -109,6 +115,29 @@ def plot_episode(data: dict, episode_num: int, save_dir: str = "./plots"):
     ax.set_ylabel("Action (normalized)")
     ax.set_title("Policy Actions: Body Rates")
     ax.set_ylim(-1.1, 1.1)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Rate tracking: commanded vs actual (per axis)
+    ax = axes[4, 0]
+    for i, (label, color) in enumerate(zip(["roll", "pitch", "yaw"], ["r", "g", "b"])):
+        ax.plot(t, ang_vel[:, i], color=color, label=f"{label} actual")
+        ax.plot(t, cmd_rates[:, i], color=color, linestyle="--", alpha=0.5,
+                label=f"{label} cmd")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Rate (deg/s)")
+    ax.set_title("Rate Tracking (solid=actual, dashed=commanded)")
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3)
+
+    # Rate tracking error
+    ax = axes[4, 1]
+    for i, (label, color) in enumerate(zip(["roll", "pitch", "yaw"], ["r", "g", "b"])):
+        ax.plot(t, rate_err[:, i], color=color, label=label, alpha=0.8)
+    ax.axhline(0, color="k", linewidth=0.5)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Rate error (deg/s)")
+    ax.set_title("Rate Controller Error (cmd - actual)")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -214,6 +243,10 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
     env = HoverEnv()
     if wrapper_cls:
         env = wrapper_cls(env)
+    base_env = env.unwrapped
+
+    # Get max_rate from wrapper if available (for plot denormalization)
+    max_rate = np.rad2deg(env.max_rate_rad) if hasattr(env, "max_rate_rad") else 360.0
 
     episode_rewards = []
     episode_lengths = []
@@ -235,7 +268,7 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
         # Setup viewer for this episode
         viewer = None
         if render:
-            viewer = mujoco.viewer.launch_passive(env.model, env.data)
+            viewer = mujoco.viewer.launch_passive(base_env.model, base_env.data)
             viewer.cam.lookat[:] = [0.0, 0.0, 0.8]
             viewer.cam.distance = 7.0
             viewer.cam.azimuth = 135
@@ -259,7 +292,7 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
             # Collect data
             if plot:
                 state = info["state"]
-                ep_data["times"].append(step_count * env.dt * env.frame_skip)
+                ep_data["times"].append(step_count * base_env.dt * base_env.frame_skip)
                 ep_data["positions"].append(state[:3].copy())
                 ep_data["targets"].append(info["target"].copy())
                 ep_data["attitudes"].append(state[3:6].copy())
@@ -279,7 +312,7 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
             if render and viewer is not None and viewer.is_running():
                 _update_visuals(viewer, drone_pos, info["target"], trail, pos_err)
                 viewer.sync()
-                time.sleep(env.dt * env.frame_skip)
+                time.sleep(base_env.dt * base_env.frame_skip)
             elif render and viewer is not None and not viewer.is_running():
                 break
 
@@ -299,7 +332,8 @@ def evaluate(model_path: str, num_episodes: int = 5, render: bool = True,
         print(f"  {status} after {step_count} steps, total reward: {total_reward:.2f}")
 
         if plot and len(ep_data["times"]) > 0:
-            plot_episode(ep_data, ep + 1, save_dir=os.path.join(model_dir, "plots"))
+            plot_episode(ep_data, ep + 1, save_dir=os.path.join(model_dir, "plots"),
+                        max_rate=max_rate)
 
     env.close()
 
@@ -356,7 +390,7 @@ def interactive_control(render: bool = True):
                 if not viewer.is_running():
                     break
                 viewer.sync()
-                time.sleep(env.dt * env.frame_skip)
+                time.sleep(base_env.dt * base_env.frame_skip)
 
             step += 1
             if step % 100 == 0:
@@ -381,7 +415,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="./models_trained/20260212_104313/best_model.zip",
+        default="./models_trained/20260213_081613/best_model.zip",
         help="Path to trained model"
     )
     parser.add_argument(
