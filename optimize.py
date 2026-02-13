@@ -15,7 +15,15 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.env_util import make_vec_env
 
-from envs import HoverEnv
+from envs import HoverEnv, RelPosActWrapper
+from envs.rate_wrapper import RateControlWrapper
+
+# ---------------------------------------------------------------------------
+# Wrapper selection — change this to switch action/observation interface
+# ---------------------------------------------------------------------------
+# wrapper_cls = None                # bare HoverEnv (12D obs, direct torques)
+# wrapper_cls = RelPosActWrapper    # 7D obs, direct torques
+wrapper_cls = RateControlWrapper    # 12D obs, body-rate actions (CTBR)
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +116,14 @@ class TrialEvalCallback(EvalCallback):
 # Objective
 # ---------------------------------------------------------------------------
 
+def _make_env():
+    """Create a HoverEnv, optionally wrapped by wrapper_cls."""
+    env = HoverEnv()
+    if wrapper_cls is not None:
+        env = wrapper_cls(env)
+    return env
+
+
 def make_objective(n_timesteps: int, n_envs: int, n_eval_envs: int,
                    n_eval_episodes: int, eval_freq: int):
     """Create an objective closure with the given configuration."""
@@ -126,8 +142,8 @@ def make_objective(n_timesteps: int, n_envs: int, n_eval_envs: int,
             else:
                 sampled_params["batch_size"] = rollout_size  # single batch
 
-        vec_env = make_vec_env(HoverEnv, n_envs=n_envs)
-        eval_env = make_vec_env(HoverEnv, n_envs=n_eval_envs)
+        vec_env = make_vec_env(_make_env, n_envs=n_envs)
+        eval_env = make_vec_env(_make_env, n_envs=n_eval_envs)
 
         model = PPO(
             policy="MlpPolicy",
@@ -221,7 +237,9 @@ def main():
     parser.add_argument("--n-trials", type=int, default=50, help="Max number of trials")
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel Optuna jobs")
     parser.add_argument("--timeout", type=int, default=None, help="Total timeout in seconds (default: no limit)")
-    parser.add_argument("--study-name", type=str, default="ppo_hover", help="Optuna study name")
+    wrapper_tag = wrapper_cls.__name__ if wrapper_cls else "base"
+    default_study = f"ppo_hover_{wrapper_tag}"
+    parser.add_argument("--study-name", type=str, default=default_study, help="Optuna study name")
     parser.add_argument("--storage", type=str, default=None, help="Optuna storage URL (e.g. sqlite:///optuna.db)")
     parser.add_argument("--n-timesteps", type=int, default=500_000, help="Training steps per trial")
     parser.add_argument("--n-envs", type=int, default=8, help="Parallel training envs per trial")
@@ -254,6 +272,7 @@ def main():
     )
 
     print(f"Starting Optuna study '{args.study_name}'")
+    print(f"  Wrapper  : {wrapper_cls.__name__ if wrapper_cls else 'None (bare HoverEnv)'}")
     print(f"  Trials    : {args.n_trials}")
     print(f"  Timeout   : {f'{args.timeout}s' if args.timeout else 'none'}")
     print(f"  Steps/trial: {args.n_timesteps}")
