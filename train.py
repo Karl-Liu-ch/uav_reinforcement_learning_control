@@ -17,7 +17,7 @@ from envs.rate_wrapper import RateControlWrapper
 def main():
     # Configuration
     total_timesteps = 10000000  # 10 million timesteps
-    n_envs = 1
+    n_envs = 16
     checkpoint_freq = 50_000
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = f"./logs/{run_timestamp}"

@@ -4,14 +4,23 @@ Converts policy outputs from [thrust, roll_rate, pitch_rate, yaw_rate]
 to [thrust, tau_x, tau_y, tau_z] using a PID rate controller.
 """
 
+import json
+import os
+
 import gymnasium as gym
 import numpy as np
 
-# Physical constants (from MuJoCo model — must match pid_controller.py)
-_IXX = 6.44e-4    # kg·m²  roll inertia
-_IYY = 6.54e-4    # kg·m²  pitch inertia
-_IZZ = 8.31e-4    # kg·m²  yaw inertia
-_MAX_TORQUE = 0.5  # N·m    env action bound
+from utils.drone_config import IXX, IYY, IZZ, MAX_TORQUE
+
+# Load rate wrapper defaults from pid_gains.json
+_GAINS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pid_gains.json")
+with open(_GAINS_PATH) as _f:
+    _RATE_DEFAULTS = json.load(_f).get("rate_wrapper", {})
+
+_DEFAULT_KD = _RATE_DEFAULTS.get("kd", [22.0, 22.0, 15.0])
+_DEFAULT_KI = _RATE_DEFAULTS.get("ki_rate_torque", 0.02)
+_DEFAULT_IMAX = _RATE_DEFAULTS.get("integral_max", 0.008)
+_DEFAULT_MAX_RATE = _RATE_DEFAULTS.get("max_rate_deg", 360.0)
 
 
 class RateControlWrapper(gym.ActionWrapper):
@@ -37,17 +46,17 @@ class RateControlWrapper(gym.ActionWrapper):
     def __init__(
         self,
         env: gym.Env,
-        max_rate: float = 360.0,
+        max_rate: float = _DEFAULT_MAX_RATE,
         kd: np.ndarray | None = None,
-        ki_rate_torque: float = 0.02,
-        integral_max: float = 0.008,
+        ki_rate_torque: float = _DEFAULT_KI,
+        integral_max: float = _DEFAULT_IMAX,
     ):
         super().__init__(env)
         self.max_rate_rad = np.deg2rad(max_rate)
 
         # PID gains
-        self.inertia = np.array([_IXX, _IYY, _IZZ])
-        self.kd = np.array(kd) if kd is not None else np.array([22.0, 22.0, 15.0])
+        self.inertia = np.array([IXX, IYY, IZZ])
+        self.kd = np.array(kd) if kd is not None else np.array(_DEFAULT_KD)
         self.ki_rate_torque = ki_rate_torque
         self.integral_max = integral_max
 
@@ -82,7 +91,7 @@ class RateControlWrapper(gym.ActionWrapper):
         tau = tau_p + self._rate_int_torque
 
         # Normalize torques to [-1, 1]
-        tau_norm = np.clip(tau / _MAX_TORQUE, -1.0, 1.0)
+        tau_norm = np.clip(tau / MAX_TORQUE, -1.0, 1.0)
 
         return np.array(
             [thrust_norm, tau_norm[0], tau_norm[1], tau_norm[2]], dtype=np.float32

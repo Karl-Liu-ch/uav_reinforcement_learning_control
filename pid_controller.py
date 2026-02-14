@@ -26,37 +26,15 @@ import mujoco.viewer
 import matplotlib.pyplot as plt
 
 from envs import HoverEnv
+from utils.drone_config import (
+    MASS, G, DT, MAX_TOTAL_THRUST, MAX_TORQUE,
+    ARM_LENGTH as L, IXX, IYY, IZZ,
+)
 
-# ── Physical constants (from MuJoCo model) ──
-MASS = 0.3446       # kg (total drone mass from MuJoCo)
-G = 9.81            # m/s²
-DT = 0.01           # s (MuJoCo timestep)
-MAX_THRUST = 52.0   # N (4 × 13 N max per motor)
-MAX_TORQUE = 0.5    # N·m (env action bound)
-L = 0.039799        # m (arm length)
-IXX = 6.44e-4       # kg·m² (roll inertia from MuJoCo mass matrix)
-IYY = 6.54e-4       # kg·m² (pitch inertia)
-IZZ = 8.31e-4       # kg·m² (yaw inertia)
-
-# ── Default PID gains (tuned through iterative experiments) ──
-DEFAULT_GAINS = {
-    "position_xy": {"kp": 2.0, "kd": 3.0, "ki": 0.2},
-    "position_z":  {"kp": 4.0, "kd": 5.0, "ki": 0.6},
-    "attitude":    {"kp": 150.0, "kd": 22.0},
-    "yaw":         {"kp": 50.0, "kd": 15.0},
-    "rate":        {"ki_torque": 0.02, "integral_max": 0.008},
-    "limits": {
-        "axy_max": 3.5,
-        "az_min": -4.0,
-        "az_max": 10.0,
-        "tilt_max": 0.25,
-        "z_integral_max": 1.5,
-        "xy_integral_max": 0.3,
-        "torque_motor_fraction": 0.7,
-        "torque_abs_max": 0.05,
-        "yaw_torque_scale": 0.5,
-    },
-}
+# ── Load default PID gains from pid_gains.json ──
+_GAINS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pid_gains.json")
+with open(_GAINS_PATH) as _f:
+    DEFAULT_GAINS = json.load(_f)
 
 
 class CascadedPIDController:
@@ -151,7 +129,7 @@ class CascadedPIDController:
         cos_r, cos_p = np.cos(roll), np.cos(pitch)
         tilt = max(cos_r * cos_p, 0.5)  # prevent division blow-up
         thrust = MASS * (G + az) / tilt
-        thrust = np.clip(thrust, 0.0, MAX_THRUST)
+        thrust = np.clip(thrust, 0.0, MAX_TOTAL_THRUST)
 
         # Motor-clipping-aware torque limit:
         # Each motor produces thrust/4. Max torque = motor_force × 2L.
@@ -196,7 +174,7 @@ class CascadedPIDController:
                          max_tau * self.yaw_torque_scale)
 
         # ── 4. Normalize to [-1, 1] ──
-        thrust_norm = 2.0 * thrust / MAX_THRUST - 1.0
+        thrust_norm = 2.0 * thrust / MAX_TOTAL_THRUST - 1.0
         action = np.array([
             thrust_norm,
             tau[0] / MAX_TORQUE,

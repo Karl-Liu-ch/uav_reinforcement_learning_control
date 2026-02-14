@@ -18,6 +18,7 @@ Quadrotor hovering control using **Proximal Policy Optimization (PPO)** with **M
 │   └── rate_wrapper.py       # CTBR action wrapper (body rates → torques)
 ├── utils/
 │   ├── __init__.py
+│   ├── drone_config.py       # Central drone physical parameters (single source of truth)
 │   ├── state.py              # QuadState — 12D state with quaternion↔Euler conversion
 │   └── normalization.py      # Observation/action normalization utilities
 ├── model/
@@ -44,6 +45,25 @@ Quadrotor hovering control using **Proximal Policy Optimization (PPO)** with **M
 | **Randomization** | Both initial drone state and target position are randomized each episode |
 
 The drone has 4 motors each producing 0–13 N of thrust. Motor commands are computed from thrust/torque demands using an inverse mixer matrix.
+
+## Drone Configuration
+
+All physical drone parameters are centralized in `utils/drone_config.py` — the single source of truth for the entire codebase. Every module (`hover_env.py`, `rate_wrapper.py`, `pid_controller.py`, `evaluate.py`) imports from here instead of hardcoding values.
+
+| Parameter | Symbol | Value | Unit |
+|---|---|---|---|
+| Max motor thrust | `MAX_MOTOR_THRUST` | 1.372 | N |
+| Arm length | `ARM_LENGTH` | 0.039799 | m |
+| Yaw torque coefficient | `YAW_TORQUE_COEFF` | 0.0201 | — |
+| Mass | `MASS` | 0.3446 | kg |
+| Timestep | `DT` | 0.01 | s |
+| Roll inertia | `IXX` | 6.44e-4 | kg·m² |
+| Pitch inertia | `IYY` | 6.54e-4 | kg·m² |
+| Yaw inertia | `IZZ` | 8.31e-4 | kg·m² |
+
+Derived constants (`MAX_TOTAL_THRUST`, `MAX_TORQUE`, `HOVER_THRUST_PER_MOTOR`) are computed automatically from the base parameters.
+
+To adapt to a different drone, update the base parameters in `drone_config.py` and keep the MuJoCo XML (`model/drone/drone.xml`) in sync — specifically `ctrlrange` and the keyframe hover ctrl values.
 
 ## Installation
 

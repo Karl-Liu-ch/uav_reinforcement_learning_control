@@ -7,12 +7,13 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils import QuadState, normalize, denormalize
+from utils.drone_config import MAX_MOTOR_THRUST, MAX_TORQUE, YAW_TORQUE_COEFF, ARM_LENGTH
 
 
 class HoverEnv(gym.Env):
     """Quadrotor hovering environment."""
-    def __init__(self, render_mode: str | None = None, max_motor_thrust: float = 13.0, yaw_torque_coeff: float = 0.0201,
-                 arm_length: float = 0.039799, max_episode_steps: int = 512,
+    def __init__(self, render_mode: str | None = None, max_motor_thrust: float = MAX_MOTOR_THRUST, yaw_torque_coeff: float = YAW_TORQUE_COEFF,
+                 arm_length: float = ARM_LENGTH, max_episode_steps: int = 512,
                  initial_state_bounds: Box | None = None, target_pos_bounds: Box | None = None):
         super().__init__()
         # Params
@@ -54,7 +55,7 @@ class HoverEnv(gym.Env):
 
         # Physical action bounds (before normalization) - thrust in N, torques in N⋅m
         self.max_total_thrust = 4 * self.max_motor_thrust  # 52 N
-        self.max_torque = 0.5  # N⋅m
+        self.max_torque = MAX_TORQUE
         self._action_bounds = Box(
             low=np.array([0.0, -self.max_torque, -self.max_torque, -self.max_torque], dtype=np.float32),
             high=np.array([self.max_total_thrust, self.max_torque, self.max_torque, self.max_torque], dtype=np.float32),
