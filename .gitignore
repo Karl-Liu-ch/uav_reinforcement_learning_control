@@ -1,2 +1,5 @@
 models_trained/
 logs/
+__pycache__/
+*.pyc
+plots/

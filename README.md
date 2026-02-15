@@ -114,9 +114,6 @@ python evaluate.py --model ./models_trained/<run>/best_model.zip --episodes 5 --
 
 # Evaluate without rendering
 python evaluate.py --model ./models_trained/<run>/best_model.zip --no-render --episodes 10
-
-# Test raw physics with constant hover thrust (no policy)
-python evaluate.py --test-hover
 ```
 
 | Flag | Description |
@@ -125,7 +122,6 @@ python evaluate.py --test-hover
 | `--episodes N` | Number of evaluation episodes (default: 5) |
 | `--no-render` | Disable MuJoCo viewer |
 | `--plot` | Save performance plots to the model directory |
-| `--test-hover` | Apply constant hover thrust instead of a learned policy |
 
 Plots show position tracking, position error, attitude, linear/angular velocity, motor commands, and policy actions over time. After evaluation, you are prompted to save a brief description of the policy behavior to `description.txt` in the model directory.
 
@@ -298,6 +294,29 @@ python optimize.py --n-trials 2 --n-timesteps 5000 --timeout 120
 The script tunes learning rate, rollout length, batch size, PPO epochs, discount factor, GAE lambda, clip range, entropy coefficient, network architecture, and activation function. Bad trials are pruned early via Optuna's `MedianPruner`.
 
 After optimization, the best hyperparameters are printed as a ready-to-paste config for `train.py`. Results are saved to `study_results_ppo_hover.csv`.
+
+### Reading Optuna results
+
+```python
+import optuna
+
+study = optuna.load_study(study_name="ppo_hover", storage="sqlite:///optuna_full.db")
+
+# Best trial
+print(f"Best value: {study.best_trial.value}")
+print(f"Best params: {study.best_trial.params}")
+
+# All trials as a DataFrame
+df = study.trials_dataframe()
+print(df.sort_values("value", ascending=False).head(10))
+```
+
+For a visual dashboard:
+
+```bash
+pip install optuna-dashboard
+optuna-dashboard sqlite:///optuna_full.db
+```
 
 ## Debugging
 
