@@ -209,6 +209,9 @@ python pid_controller.py
 
 # Headless with plots
 python pid_controller.py --no-render --plot --episodes 20
+
+# world frame pid controller to follow the trajectory
+python pid_controller_world_frame.py --plot --traj
 ```
 
 ## Action Wrapper (CTBR)
