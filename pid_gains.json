@@ -1,66 +1,77 @@
 {
-    "description": "PID gains for lightweight drone: frame 25g + battery/electronics 170g + propellers 27.7g = 222.7g total",
-    "drone_params": {
-        "mass_kg": 0.2227,
-        "mass_breakdown": "frame 0.025kg + battery 0.17kg + propellers 0.0277kg",
-        "arm_length_m": 0.039799,
-        "Ixx": 4.16e-4,
-        "Iyy": 4.23e-4,
-        "Izz": 5.37e-4,
-        "com_offset_x_m": -0.00106,
-        "max_motor_thrust_N": 13.0,
-        "max_total_thrust_N": 52.0,
-        "max_torque_Nm": 0.5,
-        "yaw_torque_coeff": 0.0201
-    },
-    "position_xy": {
-        "kp": 2.5,
-        "kd": 3.5,
-        "ki": 0.25,
-        "notes": "Increased slightly from original (2.0, 3.0, 0.2) for lighter drone with better response."
-    },
-    "position_z": {
-        "kp": 5.0,
-        "kd": 6.5,
-        "ki": 0.8,
-        "notes": "Increased from original (4.0, 5.0, 0.6) for lighter, more responsive drone."
-    },
-    "attitude": {
-        "kp": 180.0,
-        "kd": 26.0,
-        "notes": "Increased from original (150.0, 22.0) for lighter drone with higher bandwidth."
-    },
-    "yaw": {
-        "kp": 60.0,
-        "kd": 18.0,
-        "notes": "Increased from original (50.0, 15.0) for lighter drone. Ratio 3.33 rad/s per rad error."
-    },
-    "rate": {
-        "ki_torque": 0.025,
-        "integral_max": 0.01,
-        "notes": "Increased slightly from original (0.02, 0.008) for lighter drone with better torque response."
-    },
-    "rate_wrapper": {
-        "kd": [26.0, 26.0, 18.0],
-        "ki_rate_torque": 0.025,
-        "integral_max": 0.01,
-        "max_rate_deg": 360.0
-    },
-    "limits": {
-        "axy_max": 4.5,
-        "az_min": -5.0,
-        "az_max": 12.0,
-        "tilt_max": 0.25,
-        "z_integral_max": 2.0,
-        "xy_integral_max": 0.4,
-        "torque_motor_fraction": 0.7,
-        "torque_abs_max": 0.05,
-        "yaw_torque_scale": 0.6,
-        "notes": "Increased limits for lighter drone (faster response, higher acceleration capability)."
-    },
-    "tuning_notes": {
-        "drone_version": "Lightweight frame design",
-        "mass_total": "222.7g (frame 25g + battery 170g + propellers 27.7g)",
-        "changes": "All gains increased 20-25% for lighter, more responsive drone with higher bandwidth"
+  "description": "PID gains for lightweight drone: frame 25g + battery/electronics 170g + propellers 27.7g = 222.7g total",
+  "drone_params": {
+    "mass_kg": 0.2227,
+    "mass_breakdown": "frame 0.025kg + battery 0.17kg + propellers 0.0277kg",
+    "arm_length_m": 0.039799,
+    "Ixx": 0.000416,
+    "Iyy": 0.000423,
+    "Izz": 0.000537,
+    "com_offset_x_m": -0.00106,
+    "max_motor_thrust_N": 13.0,
+    "max_total_thrust_N": 52.0,
+    "max_torque_Nm": 0.5,
+    "yaw_torque_coeff": 0.0201
+  },
+  "position_xy": {
+    "kp": 4.0,
+    "kd": 3.5,
+    "ki": 0.25,
+    "notes": "Increased slightly from original (2.0, 3.0, 0.2) for lighter drone with better response."
+  },
+  "position_z": {
+    "kp": 6.0,
+    "kd": 6.5,
+    "ki": 0.8,
+    "notes": "Increased from original (4.0, 5.0, 0.6) for lighter, more responsive drone."
+  },
+  "attitude": {
+    "kp": 180.0,
+    "kd": 26.0,
+    "notes": "Increased from original (150.0, 22.0) for lighter drone with higher bandwidth."
+  },
+  "yaw": {
+    "kp": 80.0,
+    "kd": 30.0,
+    "notes": "Increased from original (50.0, 15.0) for lighter drone. Ratio 3.33 rad/s per rad error."
+  },
+  "rate": {
+    "ki_torque": 0.025,
+    "integral_max": 0.01,
+    "notes": "Increased slightly from original (0.02, 0.008) for lighter drone with better torque response."
+  },
+  "rate_wrapper": {
+    "kd": [
+      26.0,
+      26.0,
+      18.0
+    ],
+    "ki_rate_torque": 0.025,
+    "integral_max": 0.01,
+    "max_rate_deg": 360.0
+  },
+  "limits": {
+    "axy_max": 4.5,
+    "az_min": -5.0,
+    "az_max": 12.0,
+    "tilt_max": 0.25,
+    "z_integral_max": 2.0,
+    "xy_integral_max": 0.4,
+    "torque_motor_fraction": 0.7,
+    "torque_abs_max": 0.05,
+    "yaw_torque_scale": 0.6,
+    "notes": "Increased limits for lighter drone (faster response, higher acceleration capability)."
+  },
+  "tuning_notes": {
+    "drone_version": "Lightweight frame design",
+    "mass_total": "222.7g (frame 25g + battery 170g + propellers 27.7g)",
+    "changes": "All gains increased 20-25% for lighter, more responsive drone with higher bandwidth",
+    "auto_tuning": {
+      "iteration": 144,
+      "score": 0.8849650482446991,
+      "oscillation_energy": 0.16856516897678375,
+      "position_error_mean": 0.1496070957109623,
+      "rate_max": 0.14923545718193054
     }
+  }
 }
