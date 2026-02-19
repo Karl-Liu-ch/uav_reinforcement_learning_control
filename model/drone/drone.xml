@@ -47,6 +47,7 @@
         axis="0 1 0"
         range="-3.14 3.14"
         damping="0.1"/> -->
+      <inertial pos="0 0 0" mass="0.195" diaginertia="4.16e-4 4.23e-4 5.37e-4"/>
       <geom type="mesh" rgba="1 1 1 1" mesh="base_link"/>
       <site name="imu" pos="0 0 .02"/>
     <body name="prop1" pos="0.039799 -0.039799 0.0336">
