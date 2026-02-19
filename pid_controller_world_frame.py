@@ -234,9 +234,15 @@ class CascadedPIDController:
         des_wx = (self.kp_att / self.kd_att) * (des_roll - roll)
         des_wy = (self.kp_att / self.kd_att) * (des_pitch - pitch)
 
-        # Yaw: point toward the target position in the world frame
-        # desired yaw = atan2(target_y - y, target_x - x)
-        des_yaw = np.arctan2(tgt_pos[1] - pos[1], tgt_pos[0] - pos[0])
+        # Yaw: point toward the trajectory tangent direction (velocity direction)
+        # Calculate tangent direction from XY component of target velocity
+        tgt_vel_xy = tgt_vel[:2]  # XY velocity component
+        tgt_vel_norm = np.linalg.norm(tgt_vel_xy)
+        if tgt_vel_norm > 1e-6:  # Only update yaw if there is meaningful velocity
+            des_yaw = np.arctan2(tgt_vel_xy[1], tgt_vel_xy[0])
+        else:
+            # Fallback: if velocity is near zero, maintain current yaw
+            des_yaw = yaw
         yaw_err = angle_diff(des_yaw, yaw)
         des_wz = (self.kp_yaw / self.kd_yaw) * yaw_err
 
