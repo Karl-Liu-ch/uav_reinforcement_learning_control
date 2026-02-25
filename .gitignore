@@ -3,3 +3,11 @@ logs/
 __pycache__/
 *.pyc
 plots/
+.bashrc
+.vscode
+*.TXT
+*.txt
+*.out
+*.err
+*.sh
+models_brax/

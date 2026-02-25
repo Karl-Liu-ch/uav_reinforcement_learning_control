@@ -120,6 +120,16 @@ class CascadedPIDController:
         self.torque_motor_frac = lim["torque_motor_fraction"]
         self.torque_abs_max = lim["torque_abs_max"]
         self.yaw_torque_scale = lim["yaw_torque_scale"]
+        # Super-twisting yaw tuning (anti-chattering)
+        self.yaw_stw_k1 = 1.2
+        self.yaw_stw_k2 = 2.0
+        self.yaw_stw_boundary = 0.05
+        self.yaw_deadband = np.deg2rad(1.0)
+        self.yaw_v_int_max = 2.0
+        self.yaw_rate_max = 3.0
+        self.yaw_rate_lpf_alpha = 0.2
+        self.v_yaw = 0.0
+        self.des_wz_prev = 0.0
         # Integral states
         self.z_integral = 0.0
         self.xy_integral = np.zeros(2)
@@ -130,6 +140,8 @@ class CascadedPIDController:
         self.z_integral = 0.0
         self.xy_integral = np.zeros(2)
         self.rate_int_torque = np.zeros(3)
+        self.v_yaw = 0.0
+        self.des_wz_prev = 0.0
 
     def compute(self, state: np.ndarray, target) -> tuple[np.ndarray, dict]:
         """Compute normalized action from physical state and target/trajectory.
@@ -185,9 +197,24 @@ class CascadedPIDController:
             -self.xy_int_max, self.xy_int_max,
         )
         # Use target velocity in D term: derivative of error = target_vel - current_vel
-        ax = self.kp_xy * pos_err[0] + self.kd_xy * (tgt_vel[0] - vel[0]) + self.xy_integral[0]
-        ay = self.kp_xy * pos_err[1] + self.kd_xy * (tgt_vel[1] - vel[1]) + self.xy_integral[1]
-        az = self.kp_z * pos_err[2] + self.kd_z * (tgt_vel[2] - vel[2])
+        # ax = self.kp_xy * pos_err[0] + self.kd_xy * (tgt_vel[0] - vel[0]) + self.xy_integral[0]
+        # ay = self.kp_xy * pos_err[1] + self.kd_xy * (tgt_vel[1] - vel[1]) + self.xy_integral[1]
+        # az = self.kp_z * pos_err[2] + self.kd_z * (tgt_vel[2] - vel[2])
+        ex = pos_err[0]
+        exdot = tgt_vel[0] - vel[0]
+        sx = ex + 1 * exdot
+        sgn_sx = 2 / np.pi * np.atan(sx * 1)
+        ax = self.axy_max * sgn_sx
+        ey = pos_err[1]
+        eydot = tgt_vel[1] - vel[1]
+        sy = ey + 1 * eydot
+        sgn_sy = 2 / np.pi * np.atan(sy * 1)
+        ay = self.axy_max * sgn_sy
+        ez = pos_err[2]
+        ezdot = tgt_vel[2] - vel[2]
+        sz = ez + 1 * ezdot
+        sgn_sz = 2 / np.pi * np.atan(sz * 1)
+        az = self.az_max * sgn_sz
 
         # Z integral (altitude hold)
         self.z_integral = np.clip(
@@ -244,7 +271,19 @@ class CascadedPIDController:
             # Fallback: if velocity is near zero, maintain current yaw
             des_yaw = yaw
         yaw_err = angle_diff(des_yaw, yaw)
-        des_wz = (self.kp_yaw / self.kd_yaw) * yaw_err
+        # des_wz = (self.kp_yaw / self.kd_yaw) * yaw_err
+        yaw_err_eff = 0.0 if np.abs(yaw_err) < self.yaw_deadband else yaw_err
+        sgn_yaw = 2.0 / np.pi * np.arctan(yaw_err_eff / self.yaw_stw_boundary)
+        v_dot = self.yaw_stw_k2 * sgn_yaw
+        self.v_yaw = np.clip(
+            self.v_yaw + v_dot * DT,
+            -self.yaw_v_int_max,
+            self.yaw_v_int_max,
+        )
+        des_wz_raw = self.yaw_stw_k1 * np.sqrt(np.abs(yaw_err_eff)) * sgn_yaw + self.v_yaw
+        des_wz = (1.0 - self.yaw_rate_lpf_alpha) * self.des_wz_prev + self.yaw_rate_lpf_alpha * des_wz_raw
+        des_wz = np.clip(des_wz, -self.yaw_rate_max, self.yaw_rate_max)
+        self.des_wz_prev = des_wz
 
         # Inner rate PID: P term (inertia-scaled) + I term (in torque space)
         rate_err = np.array([des_wx - wx, des_wy - wy, des_wz - wz])
@@ -626,8 +665,8 @@ def evaluate(num_episodes: int = 5, render: bool = True, plot: bool = False,
             if step_count % 100 == 0:
                 s = info["state"]
                 print(f"  Step {step_count}: pos=[{s[0]:.2f}, {s[1]:.2f}, {s[2]:.2f}], "
-                      f"err={pos_err:.3f}m, reward={reward:.2f}, "
-                      f"V={info.get('voltage', nominal_voltage):.2f}")
+                    f"err={pos_err:.3f}m, reward={reward:.2f}, "
+                    f"V={info.get('voltage', nominal_voltage):.2f}")
 
         if viewer is not None:
             viewer.close()
@@ -727,9 +766,9 @@ def main():
                         help="Battery nominal voltage in volts")
     parser.add_argument("--min-voltage", type=float, default=7.6,
                         help="Battery minimum voltage clamp in volts")
-    parser.add_argument("--voltage-drop-base", type=float, default=0.01,
+    parser.add_argument("--voltage-drop-base", type=float, default=0.02,
                         help="Base voltage drop rate in V/s")
-    parser.add_argument("--voltage-drop-load", type=float, default=0.2,
+    parser.add_argument("--voltage-drop-load", type=float, default=0.1,
                         help="Load-dependent voltage drop gain in V/s")
     args = parser.parse_args()
 

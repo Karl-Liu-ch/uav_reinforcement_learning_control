@@ -14,7 +14,10 @@ class HoverEnv(gym.Env):
     """Quadrotor hovering environment."""
     def __init__(self, render_mode: str | None = None, max_motor_thrust: float = MAX_MOTOR_THRUST, yaw_torque_coeff: float = YAW_TORQUE_COEFF,
                  arm_length: float = ARM_LENGTH, max_episode_steps: int = 512,
-                 initial_state_bounds: Box | None = None, target_pos_bounds: Box | None = None):
+                 initial_state_bounds: Box | None = None, target_pos_bounds: Box | None = None,
+                 nominal_voltage: float = 8.4, min_voltage: float = 7.6,
+                 voltage_drop_base_per_sec: float = 0.01,
+                 voltage_drop_load_per_sec: float = 0.08):
         super().__init__()
         # Params
         self.max_motor_thrust = max_motor_thrust
@@ -81,6 +84,11 @@ class HoverEnv(gym.Env):
         self.frame_skip = 1  # Control at 100Hz
         self._step_count = 0
         self._prev_action = np.zeros(4, dtype=np.float32)
+        self.nominal_voltage = float(nominal_voltage)
+        self.min_voltage = float(min_voltage)
+        self.voltage_drop_base_per_sec = float(voltage_drop_base_per_sec)
+        self.voltage_drop_load_per_sec = float(voltage_drop_load_per_sec)
+        self.voltage = self.nominal_voltage
 
         # ── Mixer matrix ──
         A = np.array([
@@ -90,6 +98,15 @@ class HoverEnv(gym.Env):
             [+k,  -k,  +k,  -k],      # yaw   torque (tau_z) — from XML gear[5]
         ])
         self.A_inv = np.linalg.inv(A)
+
+    def _voltage_scale(self) -> float:
+        scale = self.voltage / self.nominal_voltage
+        return float(np.clip(scale, 0.0, 1.0))
+
+    def _update_voltage(self, motor_commands: np.ndarray):
+        load_ratio = float(np.mean(motor_commands) / max(self.max_motor_thrust, 1e-6))
+        dV = (self.voltage_drop_base_per_sec + self.voltage_drop_load_per_sec * load_ratio) * self.dt
+        self.voltage = float(np.clip(self.voltage - dV, self.min_voltage, self.nominal_voltage))
 
     def _mix_to_motors(self, thrust: float, tau_x: float, tau_y: float, tau_z: float):
         """
@@ -154,6 +171,9 @@ class HoverEnv(gym.Env):
 
         # Convert to motor commands via mix matrix
         motor_commands = self._mix_to_motors(thrust, tau_x, tau_y, tau_z)
+        voltage_scale = self._voltage_scale()
+        motor_commands = np.clip(motor_commands * voltage_scale, 0.0, self.max_motor_thrust * voltage_scale)
+        self._update_voltage(motor_commands)
         self.data.ctrl[:] = motor_commands
 
         # Step simulation
@@ -171,6 +191,8 @@ class HoverEnv(gym.Env):
             "state": self._state.vec().copy(),
             "motor_commands": motor_commands.copy(),
             "target": self.target_state.position.copy(),
+            "voltage": float(self.voltage),
+            "voltage_scale": float(voltage_scale),
         }
 
         return obs, reward, terminated, truncated, info
@@ -188,6 +210,7 @@ class HoverEnv(gym.Env):
         super().reset(seed=seed)
         self._step_count = 0
         self._prev_action = np.zeros(4, dtype=np.float32)
+        self.voltage = self.nominal_voltage
 
         # Reset MuJoCo state
         mujoco.mj_resetData(self.model, self.data)
@@ -205,7 +228,12 @@ class HoverEnv(gym.Env):
         ).astype(np.float32)
 
         obs = self._get_obs()
-        info = {"state": self._state.vec().copy(), "target": self.target_state.position.copy()}
+        info = {
+            "state": self._state.vec().copy(),
+            "target": self.target_state.position.copy(),
+            "voltage": float(self.voltage),
+            "voltage_scale": float(self._voltage_scale()),
+        }
 
         return obs, info
 

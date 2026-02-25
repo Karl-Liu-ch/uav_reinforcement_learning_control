@@ -22,7 +22,10 @@ class TrajectoryFollowEnv(gym.Env):
     def __init__(self, render_mode: str | None = None, max_motor_thrust: float = MAX_MOTOR_THRUST,
                  yaw_torque_coeff: float = YAW_TORQUE_COEFF, arm_length: float = ARM_LENGTH,
                  max_episode_steps: int = 2048, initial_state_bounds: Box | None = None,
-                 traj_center_bounds: Box | None = None, traj_duration_seconds: float | None = 30.0):
+                 traj_center_bounds: Box | None = None, traj_duration_seconds: float | None = 30.0,
+                 nominal_voltage: float = 16.8, min_voltage: float = 13.2,
+                 voltage_drop_base_per_sec: float = 0.01,
+                 voltage_drop_load_per_sec: float = 0.08):
         super().__init__()
         self.max_motor_thrust = max_motor_thrust
         k = yaw_torque_coeff
@@ -81,6 +84,11 @@ class TrajectoryFollowEnv(gym.Env):
         self.frame_skip = 1
         self._step_count = 0
         self._prev_action = np.zeros(4, dtype=np.float32)
+        self.nominal_voltage = float(nominal_voltage)
+        self.min_voltage = float(min_voltage)
+        self.voltage_drop_base_per_sec = float(voltage_drop_base_per_sec)
+        self.voltage_drop_load_per_sec = float(voltage_drop_load_per_sec)
+        self.voltage = self.nominal_voltage
 
         A = np.array([
             [ 1,   1,   1,   1],
@@ -94,6 +102,15 @@ class TrajectoryFollowEnv(gym.Env):
         self._traj_pos = None
         self._traj_vel = None
         self._traj_acc = None
+
+    def _voltage_scale(self) -> float:
+        scale = self.voltage / self.nominal_voltage
+        return float(np.clip(scale, 0.0, 1.0))
+
+    def _update_voltage(self, motor_commands: np.ndarray):
+        load_ratio = float(np.mean(motor_commands) / max(self.max_motor_thrust, 1e-6))
+        dV = (self.voltage_drop_base_per_sec + self.voltage_drop_load_per_sec * load_ratio) * self.dt
+        self.voltage = float(np.clip(self.voltage - dV, self.min_voltage, self.nominal_voltage))
 
     def _mix_to_motors(self, thrust: float, tau_x: float, tau_y: float, tau_z: float):
         u = np.array([thrust, tau_x, tau_y, tau_z])
@@ -130,6 +147,9 @@ class TrajectoryFollowEnv(gym.Env):
         physical_action = denormalize(action, self._action_bounds)
         thrust, tau_x, tau_y, tau_z = physical_action
         motor_commands = self._mix_to_motors(thrust, tau_x, tau_y, tau_z)
+        voltage_scale = self._voltage_scale()
+        motor_commands = np.clip(motor_commands * voltage_scale, 0.0, self.max_motor_thrust * voltage_scale)
+        self._update_voltage(motor_commands)
         self.data.ctrl[:] = motor_commands
         mujoco.mj_step(self.model, self.data)
         self._step_count += 1
@@ -147,6 +167,8 @@ class TrajectoryFollowEnv(gym.Env):
             "target": self._traj_pos[idx].copy(),
             "target_vel": self._traj_vel[idx].copy(),
             "target_acc": self._traj_acc[idx].copy(),
+            "voltage": float(self.voltage),
+            "voltage_scale": float(voltage_scale),
         }
 
         return obs, reward, terminated, truncated, info
@@ -199,6 +221,7 @@ class TrajectoryFollowEnv(gym.Env):
         super().reset(seed=seed)
         self._step_count = 0
         self._prev_action = np.zeros(4, dtype=np.float32)
+        self.voltage = self.nominal_voltage
         mujoco.mj_resetData(self.model, self.data)
 
         # Randomize initial UAV state
@@ -224,6 +247,8 @@ class TrajectoryFollowEnv(gym.Env):
                 "target": self._traj_pos[0].copy(),
                 "target_vel": self._traj_vel[0].copy(),
                 "target_acc": self._traj_acc[0].copy(),
+            "voltage": float(self.voltage),
+            "voltage_scale": float(self._voltage_scale()),
         }
         return obs, info
 
