@@ -125,7 +125,8 @@ class CascadedPIDController:
         self.z_integral = 0.0
         self.xy_integral = np.zeros(2)
         self.rate_int_torque = np.zeros(3)  # accumulates in N·m (torque space)
-        K, S, E = control.lqr(np.array([[0, 1], [0, 0]]), np.array([[0], [1]]), np.eye(2), np.eye(1))
+        # K, S, E = control.lqr(np.array([[0, 1], [0, 0]]), np.array([[0], [1]]), np.eye(2), np.eye(1))
+        K, S, E = control.lqr(np.array([[0, 1, 0], [0, 0, 0], [1, 0, 0]]), np.array([[0], [1], [0]]), np.eye(3), np.eye(1))
         self.K = K
         print(K)
 
@@ -190,8 +191,8 @@ class CascadedPIDController:
         )
         # Use target velocity in D term: derivative of error = target_vel - current_vel
         # ax = self.kp_xy * pos_err[0] + self.kd_xy * (tgt_vel[0] - vel[0]) + self.xy_integral[0]
-        ax = self.K[0,0] * pos_err[0] + self.K[0,1] * (tgt_vel[0] - vel[0])
-        ay = self.K[0,0] * pos_err[1] + self.K[0,1] * (tgt_vel[1] - vel[1])
+        ax = self.K[0,0] * pos_err[0] + self.K[0,1] * (tgt_vel[0] - vel[0]) + self.xy_integral[0] * self.K[0,2]
+        ay = self.K[0,0] * pos_err[1] + self.K[0,1] * (tgt_vel[1] - vel[1]) + self.xy_integral[0] * self.K[0,2]
         az = self.K[0,0] * pos_err[2] + self.K[0,1] * (tgt_vel[2] - vel[2])
 
         # Z integral (altitude hold)
@@ -199,7 +200,7 @@ class CascadedPIDController:
             self.z_integral + self.ki_z * DT * pos_err[2],
             -self.z_int_max, self.z_int_max,
         )
-        az += self.z_integral
+        az += self.z_integral * self.K[0,2]
 
         # Add feedforward acceleration from trajectory
         ax += tgt_acc[0]
