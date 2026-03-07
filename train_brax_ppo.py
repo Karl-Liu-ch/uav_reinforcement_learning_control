@@ -36,6 +36,29 @@ def _normalize_mjx_impl(impl):
     return alias_map.get(impl_lower, impl_lower)
 
 
+def _quat_wxyz_to_euler_xyz(quat_wxyz: jax.Array) -> jax.Array:
+    """Converts MuJoCo/Brax quaternion [w, x, y, z] to [roll, pitch, yaw]."""
+    w, x, y, z = quat_wxyz
+
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = jp.arctan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (w * y - z * x)
+    pitch = jp.arcsin(jp.clip(sinp, -1.0, 1.0))
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = jp.arctan2(siny_cosp, cosy_cosp)
+
+    return jp.array([roll, pitch, yaw], dtype=jp.float32)
+
+
+def _wrap_angle_rad(angle: jax.Array) -> jax.Array:
+    """Wraps angle to [-pi, pi]."""
+    return (angle + jp.pi) % (2.0 * jp.pi) - jp.pi
+
+
 class QuadHoverBraxEnv(PipelineEnv):
     def __init__(
         self,
@@ -48,6 +71,8 @@ class QuadHoverBraxEnv(PipelineEnv):
         pos_limit_xy: float = 3.0,
         pos_limit_z_low: float = 0.02,
         pos_limit_z_high: float = 4.0,
+        max_body_angle_rad: float = 0.35,
+        max_yaw_angle_rad: float = 1.0,
     ):
         sys = mjcf.load(xml_path)
         super().__init__(sys=sys, backend=backend, n_frames=n_frames)
@@ -63,6 +88,13 @@ class QuadHoverBraxEnv(PipelineEnv):
         l = ARM_LENGTH
         self.max_total_thrust = 4 * self.max_motor_thrust
         self.max_torque = MAX_TORQUE
+        self._dt = float(self.sys.opt.timestep * n_frames)
+
+        # Inner-loop attitude PID gains for [roll, pitch, yaw] tracking.
+        self._att_kp = jp.array([7.0, 7.0, 4.0], dtype=jp.float32)
+        self._att_ki = jp.array([0.15, 0.15, 0.08], dtype=jp.float32)
+        self._att_kd = jp.array([0.22, 0.22, 0.12], dtype=jp.float32)
+        self._att_int_limit = jp.array([0.4, 0.4, 0.6], dtype=jp.float32)
         
         # Mixing matrix: maps motor forces to [thrust, tau_x, tau_y, tau_z]
         # A @ [F1, F2, F3, F4] = [thrust, tau_x, tau_y, tau_z]
@@ -74,13 +106,19 @@ class QuadHoverBraxEnv(PipelineEnv):
         ])
         self.A_inv = jp.linalg.inv(A)
         
-        # Action bounds for [thrust, tau_x, tau_y, tau_z]
-        self._ctrl_min = jp.array([0.0, -self.max_torque, -self.max_torque, -self.max_torque])
-        self._ctrl_max = jp.array([self.max_total_thrust, self.max_torque, self.max_torque, self.max_torque])
+        # Policy action now commands [thrust, roll_cmd, pitch_cmd, yaw_cmd].
+        self._cmd_min = jp.array(
+            [0.0, -max_body_angle_rad, -max_body_angle_rad, -max_yaw_angle_rad],
+            dtype=jp.float32,
+        )
+        self._cmd_max = jp.array(
+            [self.max_total_thrust, max_body_angle_rad, max_body_angle_rad, max_yaw_angle_rad],
+            dtype=jp.float32,
+        )
     
     @property
     def action_size(self):
-        # Agent outputs 4 values: [thrust, tau_x, tau_y, tau_z]
+        # Agent outputs 4 values: [thrust, roll_cmd, pitch_cmd, yaw_cmd]
         return 4
     
     def _mix_to_motors(self, thrust, tau_x, tau_y, tau_z):
@@ -121,20 +159,51 @@ class QuadHoverBraxEnv(PipelineEnv):
 
         metrics = {
             "pos_error": jp.array(0.0),
+            "att_error": jp.array(0.0),
             "reward_hover": jp.array(0.0),
             "reward_action": jp.array(0.0),
             "reward": jp.array(0.0),
         }
-        info = {"time_out": done}
+        info = {
+            "time_out": done,
+            "att_int_err": jp.zeros(3, dtype=jp.float32),
+        }
         return State(pipeline_state, obs, reward, done, metrics, info)
 
     def step(self, state: State, action: jax.Array) -> State:
-        # Denormalize action from [-1, 1] to physical units [thrust, tau_x, tau_y, tau_z]
-        physical_action = (action + 1.0) * 0.5 * (self._ctrl_max - self._ctrl_min) + self._ctrl_min
-        physical_action = jp.clip(physical_action, self._ctrl_min, self._ctrl_max)
-        
-        # Convert thrust and torques to motor commands through mixing matrix
-        thrust, tau_x, tau_y, tau_z = physical_action
+        # Denormalize policy action from [-1, 1] to [thrust, desired_body_angles].
+        cmd = (action + 1.0) * 0.5 * (self._cmd_max - self._cmd_min) + self._cmd_min
+        cmd = jp.clip(cmd, self._cmd_min, self._cmd_max)
+
+        thrust = cmd[0]
+        desired_rpy = cmd[1:4]
+
+        quat_wxyz = state.pipeline_state.q[3:7]
+        current_rpy = _quat_wxyz_to_euler_xyz(quat_wxyz)
+        rpy_error = desired_rpy - current_rpy
+        rpy_error = jp.array(
+            [
+                rpy_error[0],
+                rpy_error[1],
+                _wrap_angle_rad(rpy_error[2]),
+            ],
+            dtype=jp.float32,
+        )
+
+        # MuJoCo free-joint angular velocity is in qd[3:6] for base body.
+        body_rates = state.pipeline_state.qd[3:6]
+        int_err = state.info.get("att_int_err", jp.zeros(3, dtype=jp.float32))
+        int_err = jp.clip(
+            int_err + rpy_error * self._dt,
+            -self._att_int_limit,
+            self._att_int_limit,
+        )
+
+        tau = self._att_kp * rpy_error + self._att_ki * int_err - self._att_kd * body_rates
+        tau = jp.clip(tau, -self.max_torque, self.max_torque)
+        tau_x, tau_y, tau_z = tau
+
+        # Convert thrust and PID torques to motor commands through mixing matrix.
         motor_commands = self._mix_to_motors(thrust, tau_x, tau_y, tau_z)
 
         pipeline_state = self.pipeline_step(state.pipeline_state, motor_commands)
@@ -142,6 +211,7 @@ class QuadHoverBraxEnv(PipelineEnv):
 
         pos = pipeline_state.q[:3]
         pos_error = jp.linalg.norm(pos - self._target_pos)
+        att_error = jp.linalg.norm(rpy_error)
 
         reward_hover = jp.exp(-2.0 * pos_error * pos_error)
         reward_action = -0.001 * jp.sum(jp.square(action))
@@ -165,11 +235,16 @@ class QuadHoverBraxEnv(PipelineEnv):
             done=done,
             metrics={
                 "pos_error": pos_error,
+                "att_error": att_error,
                 "reward_hover": reward_hover,
                 "reward_action": reward_action,
                 "reward": reward,
             },
-            info={**state.info, "time_out": done},
+            info={
+                **state.info,
+                "time_out": done,
+                "att_int_err": int_err,
+            },
         )
 
     def _get_obs(self, pipeline_state):
@@ -189,6 +264,8 @@ class JaxMJXQuadBraxEnv(Env):
         pos_limit_z_low: float = 0.02,
         pos_limit_z_high: float = 4.0,
         vel_limit: float = 20.0,
+        max_body_angle_rad: float = 0.35,
+        max_yaw_angle_rad: float = 1.0,
     ):
         self._xml_path = xml_path
         self._backend = "mjx"
@@ -204,7 +281,7 @@ class JaxMJXQuadBraxEnv(Env):
             self._mj_model, impl=_normalize_mjx_impl(impl)
         )
 
-        # Agent outputs 4 actions: [thrust, tau_x, tau_y, tau_z]
+        # Agent outputs 4 actions: [thrust, roll_cmd, pitch_cmd, yaw_cmd]
         self._action_size = 4
         self._observation_size = int(self._mjx_model.nq + self._mjx_model.nv)
 
@@ -214,6 +291,13 @@ class JaxMJXQuadBraxEnv(Env):
         l = ARM_LENGTH
         self.max_total_thrust = 4 * self.max_motor_thrust
         self.max_torque = MAX_TORQUE
+        self._dt = float(self._mj_model.opt.timestep)
+
+        # Inner-loop attitude PID gains for [roll, pitch, yaw] tracking.
+        self._att_kp = jp.array([7.0, 7.0, 4.0], dtype=jp.float32)
+        self._att_ki = jp.array([0.15, 0.15, 0.08], dtype=jp.float32)
+        self._att_kd = jp.array([0.22, 0.22, 0.12], dtype=jp.float32)
+        self._att_int_limit = jp.array([0.4, 0.4, 0.6], dtype=jp.float32)
         
         # Mixing matrix: maps motor forces to [thrust, tau_x, tau_y, tau_z]
         # A @ [F1, F2, F3, F4] = [thrust, tau_x, tau_y, tau_z]
@@ -225,9 +309,15 @@ class JaxMJXQuadBraxEnv(Env):
         ])
         self.A_inv = jp.linalg.inv(A)
         
-        # Action bounds for [thrust, tau_x, tau_y, tau_z]
-        self._ctrl_min = jp.array([0.0, -self.max_torque, -self.max_torque, -self.max_torque])
-        self._ctrl_max = jp.array([self.max_total_thrust, self.max_torque, self.max_torque, self.max_torque])
+        # Policy action now commands [thrust, roll_cmd, pitch_cmd, yaw_cmd].
+        self._cmd_min = jp.array(
+            [0.0, -max_body_angle_rad, -max_body_angle_rad, -max_yaw_angle_rad],
+            dtype=jp.float32,
+        )
+        self._cmd_max = jp.array(
+            [self.max_total_thrust, max_body_angle_rad, max_body_angle_rad, max_yaw_angle_rad],
+            dtype=jp.float32,
+        )
 
     @property
     def observation_size(self):
@@ -277,6 +367,7 @@ class JaxMJXQuadBraxEnv(Env):
 
         metrics = {
             "pos_error": jp.array(0.0),
+            "att_error": jp.array(0.0),
             "reward_hover": jp.array(0.0),
             "reward_action": jp.array(0.0),
             "reward": jp.array(0.0),
@@ -285,6 +376,7 @@ class JaxMJXQuadBraxEnv(Env):
             "time_out": done,
             "step_count": jp.array(0, dtype=jp.int32),
             "traj_pos": traj_pos,
+            "att_int_err": jp.zeros(3, dtype=jp.float32),
         }
         return State(data, obs, reward, done, metrics, info)
 
@@ -305,12 +397,38 @@ class JaxMJXQuadBraxEnv(Env):
         return jp.clip(F, 0.0, self.max_motor_thrust)
 
     def step(self, state: State, action: jax.Array) -> State:
-        # Denormalize action from [-1, 1] to physical units [thrust, tau_x, tau_y, tau_z]
-        physical_action = (action + 1.0) * 0.5 * (self._ctrl_max - self._ctrl_min) + self._ctrl_min
-        physical_action = jp.clip(physical_action, self._ctrl_min, self._ctrl_max)
-        
-        # Convert thrust and torques to motor commands through mixing matrix
-        thrust, tau_x, tau_y, tau_z = physical_action
+        # Denormalize policy action from [-1, 1] to [thrust, desired_body_angles].
+        cmd = (action + 1.0) * 0.5 * (self._cmd_max - self._cmd_min) + self._cmd_min
+        cmd = jp.clip(cmd, self._cmd_min, self._cmd_max)
+
+        thrust = cmd[0]
+        desired_rpy = cmd[1:4]
+
+        quat_wxyz = state.pipeline_state.qpos[3:7]
+        current_rpy = _quat_wxyz_to_euler_xyz(quat_wxyz)
+        rpy_error = desired_rpy - current_rpy
+        rpy_error = jp.array(
+            [
+                rpy_error[0],
+                rpy_error[1],
+                _wrap_angle_rad(rpy_error[2]),
+            ],
+            dtype=jp.float32,
+        )
+
+        body_rates = state.pipeline_state.qvel[3:6]
+        int_err = state.info["att_int_err"]
+        int_err = jp.clip(
+            int_err + rpy_error * self._dt,
+            -self._att_int_limit,
+            self._att_int_limit,
+        )
+
+        tau = self._att_kp * rpy_error + self._att_ki * int_err - self._att_kd * body_rates
+        tau = jp.clip(tau, -self.max_torque, self.max_torque)
+        tau_x, tau_y, tau_z = tau
+
+        # Convert thrust and PID torques to motor commands through mixing matrix.
         motor_commands = self._mix_to_motors(thrust, tau_x, tau_y, tau_z)
 
         data = state.pipeline_state.replace(ctrl=motor_commands)
@@ -328,7 +446,9 @@ class JaxMJXQuadBraxEnv(Env):
         state_is_valid = state_is_finite & (~out_of_xy) & (~out_of_z) & (~out_of_vel)
 
         pos_error_raw = jp.linalg.norm(pos - target)
+        att_error_raw = jp.linalg.norm(rpy_error)
         pos_error = jp.where(state_is_valid & jp.isfinite(pos_error_raw), pos_error_raw, 1e3)
+        att_error = jp.where(state_is_valid & jp.isfinite(att_error_raw), att_error_raw, 1e3)
         reward_hover = jp.exp(-(pos_error**2))
         reward_action = -0.001 * jp.sum(jp.square(action))
         reward_raw = reward_hover + reward_action
@@ -344,6 +464,7 @@ class JaxMJXQuadBraxEnv(Env):
             done=done,
             metrics={
                 "pos_error": pos_error,
+                "att_error": att_error,
                 "reward_hover": reward_hover,
                 "reward_action": reward_action,
                 "reward": reward,
@@ -352,6 +473,7 @@ class JaxMJXQuadBraxEnv(Env):
                 **state.info,
                 "time_out": done,
                 "step_count": step_count,
+                "att_int_err": int_err,
             },
         )
 
