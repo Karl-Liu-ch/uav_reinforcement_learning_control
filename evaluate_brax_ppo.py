@@ -1,10 +1,12 @@
 import argparse
+import importlib
 import json
 import os
 from datetime import datetime
 from functools import partial
 
 import jax
+import mujoco
 import numpy as np
 from brax.io import model
 from brax.training.agents.ppo import checkpoint as ppo_checkpoint
@@ -52,6 +54,18 @@ def _build_env(args):
         action_min=args.action_min,
         action_max=args.action_max,
     )
+
+
+def _resolve_render_xml_path(xml_path: str, render_xml_arg: str | None) -> str:
+    if render_xml_arg:
+        return os.path.abspath(render_xml_arg)
+
+    env_xml = os.path.abspath(xml_path)
+    xml_dir = os.path.dirname(env_xml)
+    scene_candidate = os.path.join(xml_dir, "scene.xml")
+    if os.path.exists(scene_candidate):
+        return scene_candidate
+    return env_xml
 
 
 def _coerce_action(action):
@@ -123,6 +137,26 @@ def _extract_target(state, env):
         return jp.asarray(env._target_pos)
 
     return jp.zeros((3,))
+
+
+def _extract_qpos_qvel(state):
+    pipeline_state = state.pipeline_state
+    if hasattr(pipeline_state, "qpos") and hasattr(pipeline_state, "qvel"):
+        return np.asarray(pipeline_state.qpos, dtype=np.float64), np.asarray(pipeline_state.qvel, dtype=np.float64)
+    if hasattr(pipeline_state, "q") and hasattr(pipeline_state, "qd"):
+        return np.asarray(pipeline_state.q, dtype=np.float64), np.asarray(pipeline_state.qd, dtype=np.float64)
+    return None, None
+
+
+def _make_tracking_camera(mj_model):
+    cam = mujoco.MjvCamera()
+    mujoco.mjv_defaultFreeCamera(mj_model, cam)
+    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+    cam.distance = max(float(mj_model.stat.extent) * 2.0, 2.5)
+    cam.azimuth = 135.0
+    cam.elevation = -25.0
+    cam.lookat[:] = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    return cam
 
 
 def _save_plots(all_errors, all_actual_xyz, all_target_xyz, plot_dir):
@@ -205,6 +239,7 @@ def main():
 
     parser.add_argument("--env", type=str, default="hover", choices=["hover", "jax_mjx_quad"])
     parser.add_argument("--xml", type=str, default=_default_xml_path())
+    parser.add_argument("--render-xml", type=str, default=None, help="XML used only for video rendering (defaults to sibling scene.xml when available)")
     parser.add_argument("--backend", type=str, default="mjx", choices=["mjx", "generalized", "spring", "positional"])
     parser.add_argument("--impl", type=str, default="jax")
     parser.add_argument("--traj-duration-seconds", type=float, default=5.0)
@@ -220,7 +255,16 @@ def main():
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--plots-dir", type=str, default="plots")
+    parser.add_argument("--record-video", action="store_true", help="Record evaluation episodes to MP4")
+    parser.add_argument("--video-fps", type=int, default=30, help="Recorded video FPS")
+    parser.add_argument("--video-width", type=int, default=640, help="Recorded video width")
+    parser.add_argument("--video-height", type=int, default=480, help="Recorded video height")
+    parser.add_argument("--video-episodes", type=int, default=1, help="How many leading episodes to record")
     args = parser.parse_args()
+
+    eval_run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    eval_out_dir = os.path.join(os.path.abspath(args.plots_dir), f"brax_eval_{eval_run_tag}")
+    os.makedirs(eval_out_dir, exist_ok=True)
 
     if args.summary:
         summary = _load_summary(args.summary)
@@ -242,6 +286,8 @@ def main():
             args.value_hidden_sizes = ",".join(str(v) for v in summary["value_hidden_sizes"])
         if args.activation is None and summary.get("activation") is not None:
             args.activation = summary["activation"]
+
+    render_xml_path = _resolve_render_xml_path(args.xml, args.render_xml)
 
     if args.params is None and args.checkpoint_path is None:
         raise ValueError("Provide --params or --checkpoint-path (or --summary containing one of them)")
@@ -304,6 +350,32 @@ def main():
     max_steps = args.max_steps if args.max_steps is not None else args.episode_length
     key = jax.random.PRNGKey(args.seed)
 
+    renderer = None
+    video_writer = None
+    video_path = None
+    render_camera = None
+    if args.record_video:
+        try:
+            imageio = importlib.import_module("imageio.v2")
+        except Exception as exc:
+            raise RuntimeError("Video recording requires imageio. Install with: pip install imageio imageio-ffmpeg") from exc
+
+        mj_model = mujoco.MjModel.from_xml_path(render_xml_path)
+        mj_data = mujoco.MjData(mj_model)
+        render_width = min(int(args.video_width), int(mj_model.vis.global_.offwidth))
+        render_height = min(int(args.video_height), int(mj_model.vis.global_.offheight))
+        if render_width != int(args.video_width) or render_height != int(args.video_height):
+            print(
+                f"video_size_clamped=requested({args.video_width}x{args.video_height}) "
+                f"framebuffer({mj_model.vis.global_.offwidth}x{mj_model.vis.global_.offheight}) "
+                f"using({render_width}x{render_height})"
+            )
+
+        renderer = mujoco.Renderer(mj_model, height=render_height, width=render_width)
+        render_camera = _make_tracking_camera(mj_model)
+        video_path = os.path.join(eval_out_dir, "evaluation_rollout.mp4")
+        video_writer = imageio.get_writer(video_path, fps=args.video_fps)
+
     episode_returns = []
     episode_lengths = []
     episode_mean_errors = []
@@ -312,59 +384,76 @@ def main():
     all_actual_xyz = []
     all_target_xyz = []
 
-    for episode_idx in range(args.episodes):
-        key, reset_key = jax.random.split(key)
-        state = reset_fn(reset_key)
-        total_reward = 0.0
-        steps = 0
-        step_errors = []
-        actual_xyz = []
-        target_xyz = []
+    try:
+        for episode_idx in range(args.episodes):
+            key, reset_key = jax.random.split(key)
+            state = reset_fn(reset_key)
+            total_reward = 0.0
+            steps = 0
+            step_errors = []
+            actual_xyz = []
+            target_xyz = []
 
-        while steps < max_steps:
-            key, sample_key = jax.random.split(key)
-            obs = state.obs
-            if hasattr(obs, "ndim") and obs.ndim == 1:
-                obs = jp.expand_dims(obs, axis=0)
+            while steps < max_steps:
+                key, sample_key = jax.random.split(key)
+                obs = state.obs
+                if hasattr(obs, "ndim") and obs.ndim == 1:
+                    obs = jp.expand_dims(obs, axis=0)
 
-            action, _ = policy_fn(obs, sample_key)
-            action = _coerce_action(action)
-            state = step_fn(state, action)
+                action, _ = policy_fn(obs, sample_key)
+                action = _coerce_action(action)
+                state = step_fn(state, action)
 
-            pos = _extract_position(state)
-            target = _extract_target(state, env)
-            traj_error = float(jp.linalg.norm(pos - target))
-            if np.isfinite(traj_error):
-                step_errors.append(traj_error)
+                pos = _extract_position(state)
+                target = _extract_target(state, env)
+                traj_error = float(jp.linalg.norm(pos - target))
+                if np.isfinite(traj_error):
+                    step_errors.append(traj_error)
 
-            actual_xyz.append(np.asarray(pos, dtype=np.float32))
-            target_xyz.append(np.asarray(target, dtype=np.float32))
+                actual_xyz.append(np.asarray(pos, dtype=np.float32))
+                target_xyz.append(np.asarray(target, dtype=np.float32))
 
-            total_reward += float(state.reward)
-            steps += 1
-            if float(state.done) > 0.5:
-                break
+                if video_writer is not None and renderer is not None and episode_idx < args.video_episodes:
+                    qpos, qvel = _extract_qpos_qvel(state)
+                    if qpos is not None and qvel is not None:
+                        mj_data.qpos[: qpos.shape[0]] = qpos
+                        mj_data.qvel[: qvel.shape[0]] = qvel
+                        mujoco.mj_forward(mj_model, mj_data)
+                        if render_camera is not None and qpos.shape[0] >= 3:
+                            render_camera.lookat[:] = np.array(qpos[:3], dtype=np.float64)
+                        renderer.update_scene(mj_data, camera=render_camera)
+                        video_writer.append_data(renderer.render())
 
-        episode_returns.append(total_reward)
-        episode_lengths.append(steps)
-        all_errors.append(step_errors)
-        all_actual_xyz.append(actual_xyz)
-        all_target_xyz.append(target_xyz)
+                total_reward += float(state.reward)
+                steps += 1
+                if float(state.done) > 0.5:
+                    break
 
-        if step_errors:
-            mean_err = float(np.mean(step_errors))
-            rmse_err = float(np.sqrt(np.mean(np.square(step_errors))))
-        else:
-            mean_err = float("nan")
-            rmse_err = float("nan")
+            episode_returns.append(total_reward)
+            episode_lengths.append(steps)
+            all_errors.append(step_errors)
+            all_actual_xyz.append(actual_xyz)
+            all_target_xyz.append(target_xyz)
 
-        episode_mean_errors.append(mean_err)
-        episode_rmse_errors.append(rmse_err)
+            if step_errors:
+                mean_err = float(np.mean(step_errors))
+                rmse_err = float(np.sqrt(np.mean(np.square(step_errors))))
+            else:
+                mean_err = float("nan")
+                rmse_err = float("nan")
 
-        print(
-            f"episode={episode_idx} return={total_reward:.4f} length={steps} "
-            f"mean_traj_error={mean_err:.6f} rmse_traj_error={rmse_err:.6f}"
-        )
+            episode_mean_errors.append(mean_err)
+            episode_rmse_errors.append(rmse_err)
+
+            print(
+                f"episode={episode_idx} return={total_reward:.4f} length={steps} "
+                f"mean_traj_error={mean_err:.6f} rmse_traj_error={rmse_err:.6f}"
+            )
+    finally:
+        if video_writer is not None:
+            video_writer.close()
+        if renderer is not None:
+            renderer.close()
 
     mean_return = sum(episode_returns) / len(episode_returns)
     mean_length = sum(episode_lengths) / len(episode_lengths)
@@ -373,8 +462,7 @@ def main():
     mean_traj_error = float(np.mean(finite_mean_errors)) if finite_mean_errors else float("nan")
     mean_rmse_error = float(np.mean(finite_rmse_errors)) if finite_rmse_errors else float("nan")
 
-    run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    plot_dir = os.path.join(os.path.abspath(args.plots_dir), f"brax_eval_{run_tag}")
+    plot_dir = eval_out_dir
     plot_paths = _save_plots(all_errors, all_actual_xyz, all_target_xyz, plot_dir)
 
     os.makedirs(plot_dir, exist_ok=True)
@@ -391,6 +479,7 @@ def main():
     summary = {
         "env": args.env,
         "params": params_source,
+        "render_xml": render_xml_path,
         "policy_hidden_sizes": list(policy_hidden_sizes),
         "value_hidden_sizes": list(value_hidden_sizes),
         "activation": args.activation,
@@ -402,6 +491,7 @@ def main():
         "mean_rmse_traj_error": mean_rmse_error,
         "plot_paths": plot_paths,
         "csv_path": csv_path,
+        "video_path": video_path,
     }
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
@@ -416,6 +506,8 @@ def main():
         print(f"saved_plot_curve={plot_paths['curve']}")
         print(f"saved_plot_hist={plot_paths['hist']}")
         print(f"saved_plot_traj3d={plot_paths['traj3d']}")
+    if video_path is not None:
+        print(f"saved_video={video_path}")
     print(f"saved_error_csv={csv_path}")
 
 

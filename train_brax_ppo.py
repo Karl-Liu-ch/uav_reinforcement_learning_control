@@ -69,15 +69,17 @@ class QuadHoverBraxEnv(PipelineEnv):
         action_min: float = 0.0,
         action_max: float = 1.5,
         pos_limit_xy: float = 3.0,
-        pos_limit_z_low: float = 0.02,
+        pos_limit_z_low: float = 0.0,
         pos_limit_z_high: float = 4.0,
         max_body_angle_rad: float = 0.35,
         max_yaw_angle_rad: float = 1.0,
+        reset_height: float = 1.0,
     ):
         sys = mjcf.load(xml_path)
         super().__init__(sys=sys, backend=backend, n_frames=n_frames)
 
         self._target_pos = jp.array([0.0, 0.0, target_height], dtype=jp.float32)
+        self._reset_height = float(reset_height)
         self._pos_limit_xy = pos_limit_xy
         self._pos_limit_z_low = pos_limit_z_low
         self._pos_limit_z_high = pos_limit_z_high
@@ -138,7 +140,7 @@ class QuadHoverBraxEnv(PipelineEnv):
         return jp.clip(F, 0.0, self.max_motor_thrust)
 
     def reset(self, rng: jax.Array) -> State:
-        rng, rng_q, rng_qd = jax.random.split(rng, 3)
+        rng, rng_q, rng_qd, rng_z = jax.random.split(rng, 4)
 
         q = self.sys.init_q + jax.random.uniform(
             rng_q,
@@ -153,6 +155,17 @@ class QuadHoverBraxEnv(PipelineEnv):
             maxval=0.01,
         )
 
+        if q.shape[0] >= 3:
+            q = q.at[2].set(
+                self._reset_height + jax.random.uniform(rng_z, (), minval=-0.02, maxval=0.02)
+            )
+
+        if q.shape[0] >= 7:
+            q = q.at[3].set(1.0)
+            q = q.at[4].set(0.0)
+            q = q.at[5].set(0.0)
+            q = q.at[6].set(0.0)
+
         pipeline_state = self.pipeline_init(q, qd)
         obs = self._get_obs(pipeline_state)
         reward, done = jp.zeros(2)
@@ -161,6 +174,7 @@ class QuadHoverBraxEnv(PipelineEnv):
             "pos_error": jp.array(0.0),
             "att_error": jp.array(0.0),
             "reward_hover": jp.array(0.0),
+            "reward_attitude": jp.array(0.0),
             "reward_action": jp.array(0.0),
             "reward": jp.array(0.0),
         }
@@ -214,9 +228,8 @@ class QuadHoverBraxEnv(PipelineEnv):
         att_error = jp.linalg.norm(rpy_error)
 
         reward_hover = jp.exp(-2.0 * pos_error * pos_error)
+        reward_attitude = jp.exp(-2.0 * att_error * att_error)
         reward_action = -0.001 * jp.sum(jp.square(action))
-        # reward = reward_hover + reward_action
-        reward = reward_hover
 
         out_of_xy = jp.logical_or(
             jp.abs(pos[0]) > self._pos_limit_xy,
@@ -226,7 +239,10 @@ class QuadHoverBraxEnv(PipelineEnv):
             pos[2] < self._pos_limit_z_low,
             pos[2] > self._pos_limit_z_high,
         )
-        done = jp.where(jp.logical_or(out_of_xy, out_of_z), 1.0, 0.0)
+        terminated = jp.logical_or(out_of_xy, out_of_z)
+        done = jp.where(terminated, 1.0, 0.0)
+        terminate_penalty = jp.where(terminated, -1.0, 0.0)
+        reward = reward_hover + 0.2 * reward_attitude + reward_action + 0.05 + terminate_penalty
 
         return state.replace(
             pipeline_state=pipeline_state,
@@ -237,6 +253,7 @@ class QuadHoverBraxEnv(PipelineEnv):
                 "pos_error": pos_error,
                 "att_error": att_error,
                 "reward_hover": reward_hover,
+                "reward_attitude": reward_attitude,
                 "reward_action": reward_action,
                 "reward": reward,
             },
@@ -261,11 +278,13 @@ class JaxMJXQuadBraxEnv(Env):
         action_min: float = 0.0,
         action_max: float = 13.0,
         pos_limit_xy: float = 3.0,
-        pos_limit_z_low: float = 0.02,
+        pos_limit_z_low: float = 0.0,
         pos_limit_z_high: float = 4.0,
         vel_limit: float = 20.0,
         max_body_angle_rad: float = 0.35,
         max_yaw_angle_rad: float = 1.0,
+        reset_height: float = 1.0,
+        done_grace_steps: int = 10,
     ):
         self._xml_path = xml_path
         self._backend = "mjx"
@@ -275,6 +294,8 @@ class JaxMJXQuadBraxEnv(Env):
         self._pos_limit_z_low = float(pos_limit_z_low)
         self._pos_limit_z_high = float(pos_limit_z_high)
         self._vel_limit = float(vel_limit)
+        self._reset_height = float(reset_height)
+        self._done_grace_steps = int(done_grace_steps)
 
         self._mj_model = mujoco.MjModel.from_xml_path(xml_path)
         self._mjx_model = mjx.put_model(
@@ -338,7 +359,9 @@ class JaxMJXQuadBraxEnv(Env):
         qvel = jp.zeros_like(data.qvel)
 
         if qpos.shape[0] >= 3:
-            qpos = qpos.at[2].set(1.0)
+            qpos = qpos.at[0].set(0.0)
+            qpos = qpos.at[1].set(0.0)
+            qpos = qpos.at[2].set(self._reset_height)
 
         if qpos.shape[0] >= 7:
             qpos = qpos.at[3].set(1.0)
@@ -347,7 +370,14 @@ class JaxMJXQuadBraxEnv(Env):
             qpos = qpos.at[6].set(0.0)
 
         rng, rng_q, rng_qd = jax.random.split(rng, 3)
-        q_noise = jax.random.uniform(rng_q, qpos.shape, minval=-0.01, maxval=0.01)
+        q_noise = jp.zeros_like(qpos)
+        if qpos.shape[0] >= 1:
+            q_noise = q_noise.at[0].set(jax.random.uniform(rng_q, (), minval=-0.01, maxval=0.01))
+        if qpos.shape[0] >= 2:
+            q_noise = q_noise.at[1].set(jax.random.uniform(rng_q, (), minval=-0.01, maxval=0.01))
+        if qpos.shape[0] >= 3:
+            q_noise = q_noise.at[2].set(jax.random.uniform(rng_q, (), minval=-0.02, maxval=0.02))
+
         qd_noise = jax.random.uniform(rng_qd, qvel.shape, minval=-0.01, maxval=0.01)
         qpos = qpos + q_noise
         qvel = qvel + qd_noise
@@ -369,6 +399,7 @@ class JaxMJXQuadBraxEnv(Env):
             "pos_error": jp.array(0.0),
             "att_error": jp.array(0.0),
             "reward_hover": jp.array(0.0),
+            "reward_attitude": jp.array(0.0),
             "reward_action": jp.array(0.0),
             "reward": jp.array(0.0),
         }
@@ -443,17 +474,23 @@ class JaxMJXQuadBraxEnv(Env):
         out_of_xy = (jp.abs(pos[0]) > self._pos_limit_xy) | (jp.abs(pos[1]) > self._pos_limit_xy)
         out_of_z = (pos[2] < self._pos_limit_z_low) | (pos[2] > self._pos_limit_z_high)
         out_of_vel = jp.any(jp.abs(data.qvel[:3]) > self._vel_limit)
+        grace_active = step_count < self._done_grace_steps
+        out_of_z = jp.where(grace_active, False, out_of_z)
         state_is_valid = state_is_finite & (~out_of_xy) & (~out_of_z) & (~out_of_vel)
+        terminated = ~state_is_valid
+        time_out = step_count >= (self._max_episode_steps - 1)
 
         pos_error_raw = jp.linalg.norm(pos - target)
         att_error_raw = jp.linalg.norm(rpy_error)
         pos_error = jp.where(state_is_valid & jp.isfinite(pos_error_raw), pos_error_raw, 1e3)
         att_error = jp.where(state_is_valid & jp.isfinite(att_error_raw), att_error_raw, 1e3)
         reward_hover = jp.exp(-(pos_error**2))
+        reward_attitude = jp.exp(-2.0 * (att_error**2))
         reward_action = -0.001 * jp.sum(jp.square(action))
-        reward_raw = reward_hover + reward_action
-        reward = jp.where(state_is_valid & jp.isfinite(reward_raw), reward_raw, -1.0)
-        done = jp.where(state_is_valid, 0.0, 1.0)
+        terminate_penalty = jp.where(terminated, -1.0, 0.0)
+        reward_raw = reward_hover + 0.2 * reward_attitude + reward_action + 0.05 + terminate_penalty
+        reward = jp.where(jp.isfinite(reward_raw), reward_raw, -1.0)
+        done = jp.where(terminated | time_out, 1.0, 0.0)
         obs = self._get_obs(data)
         obs = jp.where(jp.isfinite(obs), obs, jp.zeros_like(obs))
 
@@ -466,12 +503,13 @@ class JaxMJXQuadBraxEnv(Env):
                 "pos_error": pos_error,
                 "att_error": att_error,
                 "reward_hover": reward_hover,
+                "reward_attitude": reward_attitude,
                 "reward_action": reward_action,
                 "reward": reward,
             },
             info={
                 **state.info,
-                "time_out": done,
+                "time_out": jp.where(time_out, 1.0, 0.0),
                 "step_count": step_count,
                 "att_int_err": int_err,
             },
