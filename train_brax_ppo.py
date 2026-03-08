@@ -91,9 +91,9 @@ class QuadHoverBraxEnv(PipelineEnv):
         self._dt = float(self.sys.opt.timestep * n_frames)
 
         # Inner-loop attitude PID gains for [roll, pitch, yaw] tracking.
-        self._att_kp = jp.array([7.0, 7.0, 4.0], dtype=jp.float32)
-        self._att_ki = jp.array([0.15, 0.15, 0.08], dtype=jp.float32)
-        self._att_kd = jp.array([0.22, 0.22, 0.12], dtype=jp.float32)
+        self._att_kp = jp.array([6.0, 5.5, 4.0], dtype=jp.float32)
+        self._att_ki = jp.array([0.10, 0.08, 0.08], dtype=jp.float32)
+        self._att_kd = jp.array([0.15, 0.13, 0.12], dtype=jp.float32)
         self._att_int_limit = jp.array([0.4, 0.4, 0.6], dtype=jp.float32)
         
         # Mixing matrix: maps motor forces to [thrust, tau_x, tau_y, tau_z]
@@ -294,9 +294,9 @@ class JaxMJXQuadBraxEnv(Env):
         self._dt = float(self._mj_model.opt.timestep)
 
         # Inner-loop attitude PID gains for [roll, pitch, yaw] tracking.
-        self._att_kp = jp.array([7.0, 7.0, 4.0], dtype=jp.float32)
-        self._att_ki = jp.array([0.15, 0.15, 0.08], dtype=jp.float32)
-        self._att_kd = jp.array([0.22, 0.22, 0.12], dtype=jp.float32)
+        self._att_kp = jp.array([6.0, 5.5, 4.0], dtype=jp.float32)
+        self._att_ki = jp.array([0.10, 0.08, 0.08], dtype=jp.float32)
+        self._att_kd = jp.array([0.15, 0.13, 0.12], dtype=jp.float32)
         self._att_int_limit = jp.array([0.4, 0.4, 0.6], dtype=jp.float32)
         
         # Mixing matrix: maps motor forces to [thrust, tau_x, tau_y, tau_z]

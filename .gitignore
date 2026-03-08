@@ -10,4 +10,7 @@ plots/
 *.out
 *.err
 *.sh
-models_brax/
+recordings/
+*.expect
+*.lsf
+models_*/
